@@ -2,114 +2,129 @@
  * Auto Theme Detection Extension
  *
  * Detects terminal background color via OSC 11 query.
- * Uses a separate /dev/tty fd to avoid interfering with pi's TUI stdin/stdout.
+ * Uses an isolated child process to avoid TTY fd race with pi's TUI.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { open, type FileHandle } from "node:fs/promises";
+import { spawn } from "node:child_process";
 
-/** Send OSC 11 query and read response via a separate /dev/tty fd
- *  so we don't interfere with the TUI's stdin/stdout handling. */
+/** Runs in a spawned child process — CJS only, no imports, no TS-only syntax. */
+function workerMain() {
+  const fs = require("fs");
+  let fd: number;
+  try {
+    fd = fs.openSync("/dev/tty", "r+");
+  } catch {
+    process.exit(1);
+  }
+
+  fs.writeSync(fd, Buffer.from("\x1b]11;?\x07"));
+
+  let accumulated = "";
+  const buf = Buffer.alloc(256);
+  let attempts = 0;
+
+  const check = () => {
+    try {
+      const bytesRead = fs.readSync(fd, buf, 0, 256, null);
+      if (bytesRead > 0) {
+        accumulated += buf.subarray(0, bytesRead).toString();
+        const match = accumulated.match(/\x1b\]11;rgb:([0-9a-fA-F\/]+)\x07/);
+        if (match) {
+          fs.closeSync(fd);
+          process.stdout.write(match[1]);
+          process.exit(0);
+        }
+      }
+    } catch {}
+
+    if (++attempts < 20) setTimeout(check, 50);
+    else {
+      fs.closeSync(fd);
+      process.exit(1);
+    }
+  };
+
+  check();
+}
+
+/** Spawn a child process to query background color via OSC 11.
+ *  The child gets its own independent TTY fd, avoiding race with pi's TUI. */
 async function queryBackgroundColor(): Promise<string | null> {
-	let fh: FileHandle | null = null;
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      ["-e", `(${workerMain.toString()})()`],
+      {
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 2000,
+      },
+    );
 
-	try {
-		fh = await open("/dev/tty", "r+");
-	} catch {
-		return null;
-	}
-
-	try {
-		// Write OSC 11 query: ESC ] 11 ; ? BEL
-		await fh.write("\x1b]11;?\x07");
-
-		// Read response with timeout
-		const buf = Buffer.alloc(256);
-		let accumulated = "";
-
-		const result = await Promise.race([
-			(async () => {
-				// Poll for response
-				for (let i = 0; i < 10; i++) {
-					try {
-						const { bytesRead } = await fh!.read(buf, 0, buf.length, null);
-						if (bytesRead > 0) {
-							accumulated += buf.subarray(0, bytesRead).toString();
-							// Response format: ESC ] 11 ; rgb:RRRR/GGGG/BBBB BEL
-							const match = accumulated.match(/\x1b\]11;rgb:([0-9a-fA-F\/]+)\x07/);
-							if (match) return match[1];
-						}
-					} catch {
-						break;
-					}
-					await new Promise((r) => setTimeout(r, 50));
-				}
-				return null;
-			})(),
-			new Promise<null>((r) => setTimeout(() => r(null), 500)),
-		]);
-
-		return result;
-	} catch {
-		return null;
-	} finally {
-		await fh.close().catch(() => {});
-	}
+    let output = "";
+    child.stdout?.on("data", (data: Buffer) => (output += data.toString()));
+    child.on("error", () => resolve(null));
+    child.on("close", (code) =>
+      resolve(code === 0 && output ? output.trim() : null),
+    );
+  });
 }
 
 /** Parse rgb:RRRR/GGGG/BBBB to normalized RGB */
-function parseColor(colorStr: string): { r: number; g: number; b: number } | null {
-	const parts = colorStr.split("/");
-	if (parts.length !== 3) return null;
+function parseColor(
+  colorStr: string,
+): { r: number; g: number; b: number } | null {
+  const parts = colorStr.split("/");
+  if (parts.length !== 3) return null;
 
-	const vals = parts.map((p) => parseInt(p, 16));
-	if (vals.some((v) => isNaN(v))) return null;
+  const vals = parts.map((p) => parseInt(p, 16));
+  if (vals.some((v) => isNaN(v))) return null;
 
-	// Normalize based on bit depth (usually 16-bit per channel in OSC responses)
-	const max = vals.some((v) => v > 255) ? 65535 : 255;
-	return {
-		r: vals[0] / max,
-		g: vals[1] / max,
-		b: vals[2] / max,
-	};
+  // Normalize based on bit depth (usually 16-bit per channel in OSC responses)
+  const max = vals.some((v) => v > 255) ? 65535 : 255;
+  return {
+    r: vals[0] / max,
+    g: vals[1] / max,
+    b: vals[2] / max,
+  };
 }
 
 /** ITU-R BT.601 luminance */
 function isLight(r: number, g: number, b: number): boolean {
-	return 0.299 * r + 0.587 * g + 0.114 * b > 0.5;
+  return 0.299 * r + 0.587 * g + 0.114 * b > 0.5;
 }
 
 async function detectTheme(): Promise<"dark" | "light"> {
-	const colorStr = await queryBackgroundColor();
-	if (!colorStr) return "dark";
+  const colorStr = await queryBackgroundColor();
+  if (!colorStr) return "dark";
 
-	const rgb = parseColor(colorStr);
-	if (!rgb) return "dark";
+  const rgb = parseColor(colorStr);
+  if (!rgb) return "dark";
 
-	return isLight(rgb.r, rgb.g, rgb.b) ? "light" : "dark";
+  return isLight(rgb.r, rgb.g, rgb.b) ? "light" : "dark";
 }
 
 export default function (pi: ExtensionAPI) {
-	let intervalId: ReturnType<typeof setInterval> | null = null;
+  let intervalId: ReturnType<typeof setInterval> | null = null;
 
-	pi.on("session_start", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
+  pi.on("session_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
 
-		const theme = await detectTheme();
-		ctx.ui.setTheme(theme);
+    const theme = await detectTheme();
+    ctx.ui.setTheme(theme);
 
-		intervalId = setInterval(async () => {
-			const next = await detectTheme();
-			if (next !== ctx.ui.theme.mode) {
-				ctx.ui.setTheme(next);
-			}
-		}, 5000);
-	});
+    intervalId = setInterval(async () => {
+      const next = await detectTheme();
+      if (next !== ctx.ui.theme.mode) {
+        ctx.ui.setTheme(next);
+      }
+    }, 5000);
+  });
 
-	pi.on("session_shutdown", () => {
-		if (intervalId) {
-			clearInterval(intervalId);
-			intervalId = null;
-		}
-	});
+  pi.on("session_shutdown", () => {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+    }
+  });
 }
