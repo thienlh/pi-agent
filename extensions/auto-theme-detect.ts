@@ -80,8 +80,10 @@ function parseColor(
   const vals = parts.map((p) => parseInt(p, 16));
   if (vals.some((v) => isNaN(v))) return null;
 
-  // Normalize based on bit depth (usually 16-bit per channel in OSC responses)
-  const max = vals.some((v) => v > 255) ? 65535 : 255;
+  // Normalize based on hex digit count, not value magnitude.
+  // OSC 11 responses can be 8-bit (ff), 12-bit (fff), or 16-bit (ffff).
+  const digits = parts[0].length;
+  const max = (1 << (digits * 4)) - 1; // 2 digits→255, 3→4095, 4→65535
   return {
     r: vals[0] / max,
     g: vals[1] / max,
@@ -94,12 +96,12 @@ function isLight(r: number, g: number, b: number): boolean {
   return 0.299 * r + 0.587 * g + 0.114 * b > 0.5;
 }
 
-async function detectTheme(): Promise<"dark" | "light"> {
+async function detectTheme(): Promise<"dark" | "light" | null> {
   const colorStr = await queryBackgroundColor();
-  if (!colorStr) return "dark";
+  if (!colorStr) return null;
 
   const rgb = parseColor(colorStr);
-  if (!rgb) return "dark";
+  if (!rgb) return null;
 
   return isLight(rgb.r, rgb.g, rgb.b) ? "light" : "dark";
 }
@@ -111,11 +113,11 @@ export default function (pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
 
     const theme = await detectTheme();
-    ctx.ui.setTheme(theme);
+    if (theme) ctx.ui.setTheme(theme);
 
     intervalId = setInterval(async () => {
       const next = await detectTheme();
-      if (next !== ctx.ui.theme.mode) {
+      if (next && next !== ctx.ui.theme.mode) {
         ctx.ui.setTheme(next);
       }
     }, 5000);
