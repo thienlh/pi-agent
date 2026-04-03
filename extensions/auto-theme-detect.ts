@@ -2,35 +2,59 @@
  * Auto Theme Detection Extension
  *
  * Detects terminal background color via OSC 11 query.
- * Uses Ghostty/terminal's reported background RGB with luminance check.
+ * Uses a separate /dev/tty fd to avoid interfering with pi's TUI stdin/stdout.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { open, type FileHandle } from "node:fs/promises";
 
-/** Send OSC 11 query and read response from stdin */
+/** Send OSC 11 query and read response via a separate /dev/tty fd
+ *  so we don't interfere with the TUI's stdin/stdout handling. */
 async function queryBackgroundColor(): Promise<string | null> {
-	return new Promise((resolve) => {
-		// OSC 11 query: ESC ] 11 ; ? BEL
-		process.stdout.write("\x1b]11;?\x07");
+	let fh: FileHandle | null = null;
 
-		const onData = (data: Buffer) => {
-			const str = data.toString();
-			// Response format: ESC ] 11 ; rgb:RRRR/GGGG/BBBB BEL
-			const match = str.match(/\x1b\]11;rgb:([0-9a-fA-F\/]+)\x07/);
-			if (match) {
-				process.stdin.off("data", onData);
-				resolve(match[1]);
-			}
-		};
+	try {
+		fh = await open("/dev/tty", "r+");
+	} catch {
+		return null;
+	}
 
-		process.stdin.on("data", onData);
+	try {
+		// Write OSC 11 query: ESC ] 11 ; ? BEL
+		await fh.write("\x1b]11;?\x07");
 
-		// Timeout after 500ms
-		setTimeout(() => {
-			process.stdin.off("data", onData);
-			resolve(null);
-		}, 500);
-	});
+		// Read response with timeout
+		const buf = Buffer.alloc(256);
+		let accumulated = "";
+
+		const result = await Promise.race([
+			(async () => {
+				// Poll for response
+				for (let i = 0; i < 10; i++) {
+					try {
+						const { bytesRead } = await fh!.read(buf, 0, buf.length, null);
+						if (bytesRead > 0) {
+							accumulated += buf.subarray(0, bytesRead).toString();
+							// Response format: ESC ] 11 ; rgb:RRRR/GGGG/BBBB BEL
+							const match = accumulated.match(/\x1b\]11;rgb:([0-9a-fA-F\/]+)\x07/);
+							if (match) return match[1];
+						}
+					} catch {
+						break;
+					}
+					await new Promise((r) => setTimeout(r, 50));
+				}
+				return null;
+			})(),
+			new Promise<null>((r) => setTimeout(() => r(null), 500)),
+		]);
+
+		return result;
+	} catch {
+		return null;
+	} finally {
+		await fh.close().catch(() => {});
+	}
 }
 
 /** Parse rgb:RRRR/GGGG/BBBB to normalized RGB */
@@ -79,7 +103,7 @@ export default function (pi: ExtensionAPI) {
 			if (next !== ctx.ui.theme.mode) {
 				ctx.ui.setTheme(next);
 			}
-		}, 3000);
+		}, 5000);
 	});
 
 	pi.on("session_shutdown", () => {
