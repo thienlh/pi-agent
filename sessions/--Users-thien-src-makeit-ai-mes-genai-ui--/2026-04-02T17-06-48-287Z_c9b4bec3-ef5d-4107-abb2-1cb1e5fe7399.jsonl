@@ -1,5 +1,0 @@
-{"type":"session","version":3,"id":"c9b4bec3-ef5d-4107-abb2-1cb1e5fe7399","timestamp":"2026-04-02T17:06:48.287Z","cwd":"/Users/thien/src/makeit-ai/mes-genai-ui"}
-{"type":"model_change","id":"80ed92a4","parentId":null,"timestamp":"2026-04-02T17:06:48.289Z","provider":"fireworks","modelId":"kimi-k2p5-turbo"}
-{"type":"thinking_level_change","id":"75fdf19f","parentId":"80ed92a4","timestamp":"2026-04-02T17:06:48.289Z","thinkingLevel":"medium"}
-{"type":"message","id":"009f3c45","parentId":"75fdf19f","timestamp":"2026-04-02T17:06:53.032Z","message":{"role":"user","content":[{"type":"text","text":"hello"}],"timestamp":1775149612958}}
-{"type":"message","id":"b824a973","parentId":"009f3c45","timestamp":"2026-04-02T17:06:53.631Z","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"fireworks","model":"kimi-k2p5-turbo","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1775149613033,"errorMessage":"404 Model not found, inaccessible, and/or not deployed"}}
