@@ -1,6 +1,6 @@
 {
   "lastChangelogVersion": "0.64.0",
-  "theme": "dark",
+  "theme": "light",
   "defaultProvider": "fireworks",
   "defaultModel": "accounts/fireworks/routers/kimi-k2p5-turbo",
   "editorPaddingX": 1,
