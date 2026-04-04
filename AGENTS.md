@@ -1,1 +1,1 @@
-IMPORTANT: Use Nerd Font icons (e.g. , , , ) instead of emoji in all responses.
+IMPORTANT: DO NOT include any emoji in responses. Use Nerd Font icons (e.g. `󰄬`, ``, `󰡶`, `󰙨`) instead.

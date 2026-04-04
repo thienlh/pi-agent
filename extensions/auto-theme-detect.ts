@@ -3,12 +3,15 @@
  *
  * Detects terminal background color via OSC 11 query.
  * Uses an isolated child process to avoid TTY fd race with pi's TUI.
+ *
+ * Requirements: Node.js 24 LTS or later.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
 
 /** Runs in a spawned child process — CJS only, no imports, no TS-only syntax. */
+// @ts-nocheck
 function workerMain() {
   const fs = require("fs");
   let fd: number;
@@ -38,7 +41,7 @@ function workerMain() {
       }
     } catch {}
 
-    if (++attempts < 20) setTimeout(check, 50);
+    if (++attempts < 10) setTimeout(check, 50);
     else {
       fs.closeSync(fd);
       process.exit(1);
@@ -52,6 +55,7 @@ function workerMain() {
  *  The child gets its own independent TTY fd, avoiding race with pi's TUI. */
 async function queryBackgroundColor(): Promise<string | null> {
   return new Promise((resolve) => {
+    // stdio: [stdin, stdout, stderr] — ignore stdin/stderr, pipe stdout for the color result
     const child = spawn(
       process.execPath,
       ["-e", `(${workerMain.toString()})()`],
@@ -64,17 +68,13 @@ async function queryBackgroundColor(): Promise<string | null> {
     let output = "";
     child.stdout?.on("data", (data: Buffer) => (output += data.toString()));
     child.on("error", () => resolve(null));
-    child.on("close", (code) =>
-      resolve(code === 0 && output ? output.trim() : null),
-    );
+    child.on("close", (code) => resolve(code === 0 && output ? output : null));
   });
 }
 
 /** Parse rgb:RRRR/GGGG/BBBB to normalized RGB */
-function parseColor(
-  colorStr: string,
-): { r: number; g: number; b: number } | null {
-  const parts = colorStr.split("/");
+function parseColor(color: string): { r: number; g: number; b: number } | null {
+  const parts = color.split("/");
   if (parts.length !== 3) return null;
 
   const vals = parts.map((p) => parseInt(p, 16));
@@ -91,12 +91,14 @@ function parseColor(
   };
 }
 
-/** ITU-R BT.601 luminance */
+/** ITU-R BT.601 luminance
+ *  https://www.itu.int/rec/R-REC-BT.601/
+ */
 function isLight(r: number, g: number, b: number): boolean {
   return 0.299 * r + 0.587 * g + 0.114 * b > 0.5;
 }
 
-async function detectTheme(): Promise<"dark" | "light" | null> {
+async function detectThemeMode(): Promise<"dark" | "light" | null> {
   const colorStr = await queryBackgroundColor();
   if (!colorStr) return null;
 
@@ -112,13 +114,15 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
 
-    const theme = await detectTheme();
-    if (theme) ctx.ui.setTheme(theme);
+    const currentMode = ctx.ui.theme.mode;
+    const detectedMode = await detectThemeMode();
+    if (detectedMode && detectedMode !== currentMode)
+      ctx.ui.setTheme(detectedMode);
 
     intervalId = setInterval(async () => {
-      const next = await detectTheme();
-      if (next && next !== ctx.ui.theme.mode) {
-        ctx.ui.setTheme(next);
+      const nextMode = await detectThemeMode();
+      if (nextMode && nextMode !== ctx.ui.theme.mode) {
+        ctx.ui.setTheme(nextMode);
       }
     }, 5000);
   });
