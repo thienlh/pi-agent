@@ -1,13 +1,13 @@
 /**
  * Auto Theme Detection Extension
  *
- * Detects terminal background color via OSC 11 query.
- * Uses an isolated child process to avoid TTY fd race with pi's TUI.
+ * Detects terminal background color via OSC 11 query (outside nvim),
+ * or reloads current theme from disk (inside nvim terminal).
  *
  * Requirements: Node.js 24 LTS or later.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
 
 /** Runs in a spawned child process — CJS only, no imports, no TS-only syntax. */
@@ -94,10 +94,11 @@ function parseColor(color: string): { r: number; g: number; b: number } | null {
 /** ITU-R BT.601 luminance
  *  https://www.itu.int/rec/R-REC-BT.601/
  */
-function isLight(r: number, g: number, b: number): boolean {
+function isLightMode(r: number, g: number, b: number): boolean {
   return 0.299 * r + 0.587 * g + 0.114 * b > 0.5;
 }
 
+/** Detect theme mode via OSC 11 query */
 async function detectThemeMode(): Promise<"dark" | "light" | null> {
   const colorStr = await queryBackgroundColor();
   if (!colorStr) return null;
@@ -105,25 +106,41 @@ async function detectThemeMode(): Promise<"dark" | "light" | null> {
   const rgb = parseColor(colorStr);
   if (!rgb) return null;
 
-  return isLight(rgb.r, rgb.g, rgb.b) ? "light" : "dark";
+  return isLightMode(rgb.r, rgb.g, rgb.b) ? "light" : "dark";
+}
+
+/** Check if running inside Neovim terminal */
+function isNvimTerminal(): boolean {
+  return process.env.NVIM !== undefined;
 }
 
 export default function (pi: ExtensionAPI) {
   let intervalId: ReturnType<typeof setInterval> | null = null;
 
-  pi.on("session_start", async (_event, ctx) => {
+  async function updateTheme(ctx: ExtensionContext): Promise<void> {
     if (!ctx.hasUI) return;
 
-    const currentMode = ctx.ui.theme.mode;
-    const detectedMode = await detectThemeMode();
-    if (detectedMode && detectedMode !== currentMode)
-      ctx.ui.setTheme(detectedMode);
-
-    intervalId = setInterval(async () => {
+    if (isNvimTerminal()) {
+      // Inside nvim: reload current theme from disk
+      const currentTheme = ctx.ui.theme.name;
+      ctx.ui.setTheme(currentTheme);
+    } else {
+      // Outside nvim: query terminal for dark/light via OSC 11
       const nextMode = await detectThemeMode();
       if (nextMode && nextMode !== ctx.ui.theme.mode) {
         ctx.ui.setTheme(nextMode);
       }
+    }
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+
+    // Initial theme detection
+    await updateTheme(ctx);
+
+    intervalId = setInterval(() => {
+      updateTheme(ctx);
     }, 5000);
   });
 
